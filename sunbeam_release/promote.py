@@ -33,6 +33,8 @@ OPENSTACK_CHARMS = [
     "cinder-volume-ceph",
     "cinder-volume-hitachi",
     "cinder-volume-purestorage",
+    "cinder-volume-hpe3par",
+    "cinder-volume-infinidat",
     # "cloudkitty-k8s",
     "designate-k8s",
     "epa-orchestrator",
