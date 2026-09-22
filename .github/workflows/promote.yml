@@ -1,0 +1,56 @@
+name: Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Source channel for promotion"
+        type: choice
+        options: [candidate, beta, edge]
+        default: candidate
+        required: true
+      release:
+        description: "Sunbeam release for tracks"
+        type: choice
+        options: [antelope, bobcat, caracal, epoxy, gazpacho]
+        default: gazpacho
+        required: true
+      dry-run:
+        description: "Dry run (print commands only, no promotion)"
+        type: boolean
+        default: true
+        required: true
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: promotion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+      - name: Install charmcraft, snapcraft and juju
+        run: |
+          sudo snap install --classic charmcraft --channel 4.x/stable
+          sudo snap install --classic snapcraft --channel 9.x/stable
+          sudo snap install juju --channel=3.6/stable
+      - name: Run promote
+        env:
+          CHARMHUB_AUTH: ${{ secrets.CHARMHUB_AUTH }}
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          uv run sunbeam-release promote \
+            --source "${{ inputs.source }}" \
+            --release "${{ inputs.release }}" \
+            ${{ inputs.dry-run && '--dry-run' || '' }}
+      - name: Upload revision list
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: revision-list
+          path: |
+            ${{ inputs.release }}-*.yaml
+            ${{ inputs.release }}-*.txt
+          if-no-files-found: ignore

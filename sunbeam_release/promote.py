@@ -15,6 +15,7 @@
 """Release helpers for promotion of charms between channels."""
 
 import json
+import os
 import subprocess
 import time
 from datetime import datetime
@@ -185,10 +186,31 @@ TRACKS = {
 }
 
 
+def charmcraft_env() -> dict:
+    """Environment for charmcraft calls.
+
+    When the CHARMHUB_AUTH env var is set (exported charmcraft
+    credentials, e.g. in CI) it is passed to charmcraft as
+    CHARMCRAFT_AUTH. Without it charmcraft falls back to the
+    logged-in credentials.
+    """
+    env = os.environ.copy()
+    auth = os.environ.get("CHARMHUB_AUTH")
+    if auth:
+        env["CHARMCRAFT_AUTH"] = auth
+    return env
+
+
 def charm_metadata(app: str) -> dict:
     """Retrieve metadata about a specific charm."""
     cmd = ["charmcraft", "status", app, "--format", "json"]
-    process = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    process = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=charmcraft_env(),
+    )
     return json.loads(process.stdout.strip())
 
 
@@ -399,6 +421,7 @@ def snap_promote_command(
             from_channel,
             "--to-channel",
             to_channel,
+            "--yes",
         ]
 
         revisions["promoted"] = True
@@ -732,6 +755,10 @@ def promote(
                 process = subprocess.run(cmd, check=True)
             else:
                 process = subprocess.run(
-                    cmd, capture_output=True, text=True, check=True
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    env=charmcraft_env(),
                 )
                 print(process.stdout)

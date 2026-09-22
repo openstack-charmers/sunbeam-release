@@ -23,6 +23,33 @@ The revision of dependent project charms (which sunbeam-release does not
 administer) is looked up with `juju info`, and dependent snaps with
 `snap info`.
 
+## Exported credentials (CI)
+
+Promotion only releases existing revisions, it never uploads, so exported
+credentials only need release permissions.
+
+Charmhub credentials (consumed via the CHARMHUB_AUTH environment variable,
+see charmcraft_env() in sunbeam_release/promote.py):
+
+    charmcraft login --export charmhub-creds \
+        --permission package-view --permission package-manage \
+        --ttl 2592000
+    export CHARMHUB_AUTH=$(cat charmhub-creds)
+
+Snap Store credentials (SNAPCRAFT_STORE_CREDENTIALS is inherited by the
+snapcraft promote calls):
+
+    snapcraft export-login snapcraft-creds \
+        --snaps openstack,openstack-hypervisor,cinder-volume,openstack-network-agents,manila-data,epa-orchestrator,consul-client \
+        --acls package_access,package_release \
+        --expires "$(date -u -d '+30 days' +%Y-%m-%dT%H:%M:%SZ)"
+    export SNAPCRAFT_STORE_CREDENTIALS=$(cat snapcraft-creds)
+
+Valid Snap Store ACLs are documented at
+https://dashboard.snapcraft.io/docs/reference/v1/macaroon.html. The
+--expires value must be UTC ISO 8601. The charmcraft TTL is in seconds
+(2592000 = 30 days).
+
 ## Promotion of charms between channels
 
 sunbeam-release can be used to compare and promote charms between channels

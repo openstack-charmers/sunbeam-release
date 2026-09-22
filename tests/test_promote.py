@@ -128,7 +128,16 @@ def test_snap_promote_command_records_revisions():
             source_channel="candidate",
             target_channel="stable",
         )
-    assert cmd is not None
+    assert cmd == [
+        "snapcraft",
+        "promote",
+        "openstack",
+        "--from-channel",
+        "2023.1/candidate",
+        "--to-channel",
+        "2023.1/stable",
+        "--yes",
+    ]
     assert revisions["type"] == "snap"
     assert revisions["source_revision"] == "100"
     assert revisions["target_revision"] == "99"
@@ -340,3 +349,21 @@ def test_render_yaml_and_table():
     assert "dependent_charms:" in table_out
     assert "1/stable           -" in table_out
     assert "empty:" not in table_out
+
+
+def test_charm_metadata_uses_exported_credential():
+    import os
+
+    from sunbeam_release.promote import charm_metadata
+
+    with (
+        mock.patch.dict(os.environ, {"CHARMHUB_AUTH": "exported-cred"}),
+        mock.patch(
+            "sunbeam_release.promote.subprocess.run",
+            return_value=_run_mock("[]"),
+        ) as run,
+    ):
+        charm_metadata("keystone-k8s")
+        assert (
+            run.call_args.kwargs["env"]["CHARMCRAFT_AUTH"] == "exported-cred"
+        )
