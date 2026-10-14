@@ -1,15 +1,93 @@
 """Tests for revision list collection during promotion."""
 
 import json
+from pathlib import Path
 from unittest import mock
 
+import pytest
+from click.testing import CliRunner
+
 from sunbeam_release.promote import (
+    TRACKS,
     charm_stable_revision,
     dependent_track,
+    promote,
     release_command,
     snap_promote_command,
     snap_stable_revision,
 )
+
+
+@pytest.mark.parametrize(
+    "release,ovn_supported",
+    [
+        ("antelope", True),
+        ("bobcat", True),
+        ("caracal", True),
+        ("epoxy", True),
+        ("gazpacho", False),
+        ("future", False),
+    ],
+)
+def test_promote_ovn_charms_release_gate(release, ovn_supported):
+    runner = CliRunner()
+    future_tracks = dict(TRACKS["gazpacho"], openstack="2027.1")
+
+    def promotion(app, track, source_channel, target_channel):
+        return ["charmcraft", "release", app], {
+            "app": app,
+            "type": "charm",
+            "source_revision": 2,
+            "target_revision": 1,
+            "promoted": True,
+        }
+
+    def snap_promotion(*args, **kwargs):
+        command, revisions = promotion(*args, **kwargs)
+        revisions["type"] = "snap"
+        return command, revisions
+
+    with (
+        runner.isolated_filesystem(),
+        mock.patch.dict(TRACKS, {"future": future_tracks}),
+        mock.patch(
+            "sunbeam_release.promote.release_command",
+            side_effect=promotion,
+        ) as release_command_mock,
+        mock.patch(
+            "sunbeam_release.promote.snap_promote_command",
+            side_effect=snap_promotion,
+        ),
+        mock.patch(
+            "sunbeam_release.promote.charm_stable_revision", return_value=1
+        ),
+        mock.patch(
+            "sunbeam_release.promote.snap_stable_revision", return_value="1"
+        ),
+        mock.patch("sunbeam_release.promote.subprocess.run") as run,
+    ):
+        result = runner.invoke(
+            promote,
+            ["--release", release, "--dry-run", "--format", "yaml"],
+        )
+        assert result.exit_code == 0, result.output
+        report = next(Path.cwd().glob("*.yaml")).read_text()
+        calls = {
+            call.args[0]: call.kwargs
+            for call in release_command_mock.call_args_list
+        }
+        for charm in ("ovn-relay-k8s", "ovn-central-k8s"):
+            assert (charm in calls) is ovn_supported
+            assert (f"- app: {charm}\n" in report) is ovn_supported
+            assert (
+                f"Running cmd: charmcraft release {charm}" in result.output
+            ) is ovn_supported
+            if ovn_supported:
+                assert calls[charm]["track"] == TRACKS[release]["ovn"]
+        assert "keystone-k8s" in calls
+        if release in ("gazpacho", "future"):
+            assert "- app: microovn\n  channel: 26.03/stable" in report
+        run.assert_not_called()
 
 
 def _charm_status(track, source_rev, target_rev, source_status="active"):
