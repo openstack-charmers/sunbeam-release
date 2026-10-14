@@ -601,16 +601,18 @@ def promote(
         if cmd:
             release_cmds.append(cmd)
 
-    for charm in OVN_CHARMS:
-        cmd, revisions = release_command(
-            charm,
-            track=TRACKS[release]["ovn"],
-            source_channel=source,
-            target_channel=WORKFLOWS[source],
-        )
-        revision_list.append(revisions)
-        if cmd:
-            release_cmds.append(cmd)
+    # Standalone OVN charms are unsupported from OpenStack 2026.1 onwards.
+    if tuple(map(int, TRACKS[release]["openstack"].split("."))) < (2026, 1):
+        for charm in OVN_CHARMS:
+            cmd, revisions = release_command(
+                charm,
+                track=TRACKS[release]["ovn"],
+                source_channel=source,
+                target_channel=WORKFLOWS[source],
+            )
+            revision_list.append(revisions)
+            if cmd:
+                release_cmds.append(cmd)
 
     for charm in CONSUL_CHARMS:
         if "consul" in TRACKS[release]:
