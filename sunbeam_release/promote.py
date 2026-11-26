@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import time
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import (
@@ -143,6 +144,8 @@ WORKFLOWS = {
     "candidate": "stable",
 }
 
+DEFAULT_CHARM_BASE_CHANNELS = ("22.04", "24.04")
+
 TRACKS = {
     "antelope": {
         "openstack": "2023.1",
@@ -182,6 +185,8 @@ TRACKS = {
         "consul": "1.19",
         "microceph": "tentacle",
         "k8s": "1.36-classic",
+        # Shared tracks can still publish Jammy revisions.
+        "charm_promotion_bases": ("22.04", "24.04", "26.04"),
     },
 }
 
@@ -281,7 +286,7 @@ def release_command(
     track: str,
     source_channel: str,
     target_channel: str,
-    base_channels: List[str] = ["22.04", "24.04"],
+    base_channels: Sequence[str] = DEFAULT_CHARM_BASE_CHANNELS,
     base_archs: List[str] = ["amd64"],
 ) -> Tuple[Union[List[str], None], dict]:
     """Generate a charmcraft release command to promote between tracks."""
@@ -354,6 +359,89 @@ def release_command(
                         break
 
     return release_cmd, revisions
+
+
+def release_commands(
+    app: str,
+    track: str,
+    source_channel: str,
+    target_channel: str,
+    base_channels: tuple[str, ...],
+) -> tuple[list[list[str]], list[dict]]:
+    """Plan promotion for each configured base and published architecture."""
+    source_name = f"{track}/{source_channel}"
+    target_name = f"{track}/{target_channel}"
+    print(f"Checking {app}: {source_name}->{target_name}")
+    commands = {}
+    revisions = []
+
+    for channel_map in charm_metadata(app):
+        if channel_map["track"] != track:
+            continue
+        for mapping in channel_map["mappings"]:
+            platforms = mapping["base"]
+            base = str(platforms["channel"])
+            if base not in base_channels:
+                continue
+            architecture = platforms["architecture"]
+            releases = {
+                entry["channel"]: entry for entry in mapping["releases"]
+            }
+            source = releases.get(source_name, {})
+            target = releases.get(target_name, {})
+            source_rev = source.get("revision")
+            target_rev = target.get("revision")
+            promote_revision = (
+                source_rev is not None
+                and source.get("status") != "tracking"
+                and source_rev != target_rev
+            )
+            revisions.append(
+                {
+                    "app": app,
+                    "type": "charm",
+                    "base": base,
+                    "architecture": architecture,
+                    "source_revision": source_rev,
+                    "target_revision": target_rev,
+                    "promoted": promote_revision,
+                }
+            )
+            if not promote_revision:
+                if source.get("status") == "tracking":
+                    reason = "source channel is tracking"
+                elif source_rev is None:
+                    reason = "source channel is empty"
+                else:
+                    reason = f"revision {source_rev} already on target"
+                print(f"  {base}/{architecture}: {reason}, skipping")
+                continue
+
+            command = [
+                "charmcraft",
+                "release",
+                app,
+                "--channel",
+                target_name,
+                "--revision",
+                str(source_rev),
+            ]
+            for resource in sorted(
+                source.get("resources", []), key=lambda item: item["name"]
+            ):
+                command.extend(
+                    [
+                        "--resource",
+                        f"{resource['name']}:{resource['revision']}",
+                    ]
+                )
+            if source_rev in commands and commands[source_rev] != command:
+                raise click.ClickException(
+                    f"{app} revision {source_rev} has conflicting source resources"
+                )
+            commands[source_rev] = command
+
+    return list(commands.values()), revisions
 
 
 def snap_promote_command(
@@ -502,13 +590,11 @@ def revision_entries(revs: List[dict]) -> List[dict]:
     for rev in revs:
         current = rev["target_revision"]
         promoted = rev["source_revision"] if rev["promoted"] else current
-        entries.append(
-            {
-                "app": rev["app"],
-                "current_revision": current,
-                "promoted_revision": promoted,
-            }
-        )
+        entry = {"app": rev["app"]}
+        if "base" in rev:
+            entry.update(base=rev["base"], architecture=rev["architecture"])
+        entry.update(current_revision=current, promoted_revision=promoted)
+        entries.append(entry)
     return entries
 
 
@@ -543,6 +629,8 @@ def render_yaml(sections: List[Tuple[str, List[dict]]]) -> str:
                 if key == "app":
                     continue
                 value = entry[key] if entry[key] is not None else "null"
+                if key == "base":
+                    value = json.dumps(entry[key])
                 lines.append(f"  {key}: {value}")
     return "\n".join(lines)
 
@@ -589,51 +677,38 @@ def promote(
 
     release_cmds = []
     revision_list = []
+    promotion_bases = TRACKS[release].get("charm_promotion_bases", ())
+    single_base_channels = promotion_bases or DEFAULT_CHARM_BASE_CHANNELS
 
-    for charm in OPENSTACK_CHARMS:
-        cmd, revisions = release_command(
-            charm,
-            track=TRACKS[release]["openstack"],
-            source_channel=source,
-            target_channel=WORKFLOWS[source],
-        )
-        revision_list.append(revisions)
-        if cmd:
-            release_cmds.append(cmd)
-
-    for charm in OVN_CHARMS:
-        cmd, revisions = release_command(
-            charm,
-            track=TRACKS[release]["ovn"],
-            source_channel=source,
-            target_channel=WORKFLOWS[source],
-        )
-        revision_list.append(revisions)
-        if cmd:
-            release_cmds.append(cmd)
-
-    for charm in CONSUL_CHARMS:
-        if "consul" in TRACKS[release]:
-            cmd, revisions = release_command(
-                charm,
-                track=TRACKS[release]["consul"],
-                source_channel=source,
-                target_channel=WORKFLOWS[source],
-            )
-            revision_list.append(revisions)
-            if cmd:
-                release_cmds.append(cmd)
-
-    for charm in ["rabbitmq-k8s", "designate-bind-k8s"]:
-        cmd, revisions = release_command(
-            charm,
-            track=TRACKS[release][charm],
-            source_channel=source,
-            target_channel=WORKFLOWS[source],
-        )
-        revision_list.append(revisions)
-        if cmd:
-            release_cmds.append(cmd)
+    charm_groups = [
+        ("openstack", OPENSTACK_CHARMS),
+        ("ovn", OVN_CHARMS),
+        ("consul", CONSUL_CHARMS),
+        ("rabbitmq-k8s", ["rabbitmq-k8s"]),
+        ("designate-bind-k8s", ["designate-bind-k8s"]),
+    ]
+    for track_name, charms in charm_groups:
+        track = TRACKS[release].get(track_name)
+        if track is None:
+            continue
+        for charm in charms:
+            if len(promotion_bases) > 1:
+                commands, revisions = release_commands(
+                    charm, track, source, WORKFLOWS[source], promotion_bases
+                )
+                release_cmds.extend(commands)
+                revision_list.extend(revisions)
+            else:
+                cmd, revisions = release_command(
+                    charm,
+                    track,
+                    source,
+                    WORKFLOWS[source],
+                    base_channels=single_base_channels,
+                )
+                revision_list.append(revisions)
+                if cmd:
+                    release_cmds.append(cmd)
 
     # Promote OpenStack snaps
     for snap in OPENSTACK_SNAPS:
@@ -659,12 +734,6 @@ def promote(
             revision_list.append(revisions)
             if cmd:
                 release_cmds.append(cmd)
-
-    for rev in revision_list:
-        current = rev["target_revision"]
-        rev["promoted_revision"] = (
-            rev["source_revision"] if rev["promoted"] else current
-        )
 
     dependent_charms = []
     for app in DEPENDENT_CHARMS:

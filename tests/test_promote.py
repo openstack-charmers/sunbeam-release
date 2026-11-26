@@ -3,10 +3,15 @@
 import json
 from unittest import mock
 
+import pytest
+
 from sunbeam_release.promote import (
     charm_stable_revision,
     dependent_track,
     release_command,
+    release_commands,
+    render_yaml,
+    revision_entries,
     snap_promote_command,
     snap_stable_revision,
 )
@@ -111,6 +116,71 @@ def test_release_command_not_promoted_when_source_tracking():
     assert revisions["promoted"] is False
 
 
+@pytest.mark.parametrize(
+    ("track", "existing_base", "new_base"),
+    [
+        ("2026.1", "24.04", "26.04"),
+        ("2028.1", "26.04", "28.04"),
+    ],
+)
+def test_promotes_distinct_base_and_architecture_mappings(
+    track, existing_base, new_base
+):
+    status = _charm_status(track, source_rev=42, target_rev=40)
+    mappings = status[0]["mappings"]
+    mappings[0]["base"]["channel"] = existing_base
+    mappings[0]["releases"][0]["resources"] = [
+        {"name": "image", "revision": 10}
+    ]
+    for base, arch, revision in [
+        (new_base, "amd64", 43),
+        (new_base, "arm64", 44),
+        ("22.04", "amd64", 45),
+    ]:
+        mappings.append(
+            {
+                "base": {"channel": base, "architecture": arch},
+                "releases": [
+                    {
+                        "channel": f"{track}/candidate",
+                        "revision": revision,
+                        "status": "active",
+                        "resources": [
+                            {"name": "image", "revision": revision + 1}
+                        ],
+                    }
+                ],
+            }
+        )
+    with mock.patch(
+        "sunbeam_release.promote.charm_metadata", return_value=status
+    ):
+        commands, revisions = release_commands(
+            "keystone-k8s",
+            track,
+            "candidate",
+            "stable",
+            (existing_base, new_base),
+        )
+    assert [command[-3:] for command in commands] == [
+        ["42", "--resource", "image:10"],
+        ["43", "--resource", "image:44"],
+        ["44", "--resource", "image:45"],
+    ]
+    assert [
+        (entry["base"], entry["architecture"], entry["target_revision"])
+        for entry in revisions
+    ] == [
+        (existing_base, "amd64", 40),
+        (new_base, "amd64", None),
+        (new_base, "arm64", None),
+    ]
+    yaml_output = render_yaml([("charms:", revision_entries(revisions))])
+    assert f'  base: "{existing_base}"' in yaml_output
+    assert f'  base: "{new_base}"' in yaml_output
+    assert '  base: "22.04"' not in yaml_output
+
+
 def test_snap_promote_command_records_revisions():
     snap_info = (
         "snap-id: abc\n"
@@ -198,8 +268,6 @@ def test_snap_stable_revision():
 
 
 def test_revision_entries_promoted_and_not():
-    from sunbeam_release.promote import revision_entries
-
     entries = revision_entries(
         [
             {
